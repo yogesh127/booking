@@ -1,0 +1,768 @@
+{
+  "info": {
+    "name": "Airline Reservation System",
+    "description": "Backend API for a single-airline reservation system: flight schedule management, flight search, seat inventory, ticket booking, cancellation, and admin onboarding of airports/aircraft.\n\n**Running the app** (so `{{baseUrl}}` resolves): `docker compose --profile standalone up -d --build` starts MySQL and the app together on one Docker network (`docker compose --profile standalone down` to stop). Alternatively `./mvnw spring-boot:run` (auto-provisions MySQL via spring-boot-docker-compose) or `docker build -t booking:latest .` + `docker run` pointed at a separately-running MySQL via `host.docker.internal`. `baseUrl` defaults to `http://localhost:8080` either way. See the repo's README for details.\n\n**Authentication**: JWT bearer tokens, two roles. Run the two requests in the **Auth** folder first - each logs in and captures its token into the `adminToken`/`clientToken` collection variables via its Tests script. Every other protected folder references those variables as a Bearer token at the folder level, so nothing else needs manual edits. `/api/v1/admin/**` requires the ADMIN token; `/api/v1/bookings/**` accepts either token; `/api/v1/flights/**` (search, seat map) is public, no auth. Tokens expire 1 hour after login (`app.jwt.expiration-minutes`) - rerun the Auth requests if calls start failing with 401 partway through a long session.\n\n**Running the requests**: top-to-bottom - Auth first, then the chained requests (Create Schedule -> Search Flights -> Create Booking) auto-populate `scheduleId`, `flightInstanceId` and `bookingReference` collection variables via their Tests scripts, so later requests work without manual edits.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080", "type": "string" },
+    { "key": "adminUsername", "value": "admin", "type": "string" },
+    { "key": "adminPassword", "value": "admin123", "type": "string" },
+    { "key": "clientUsername", "value": "client", "type": "string" },
+    { "key": "clientPassword", "value": "client123", "type": "string" },
+    { "key": "adminToken", "value": "", "type": "string" },
+    { "key": "clientToken", "value": "", "type": "string" },
+    { "key": "aircraftId", "value": "1", "type": "string" },
+    { "key": "flightNumber", "value": "BF100", "type": "string" },
+    { "key": "sourceAirportCode", "value": "DXB", "type": "string" },
+    { "key": "destinationAirportCode", "value": "LHR", "type": "string" },
+    { "key": "searchDate", "value": "2026-10-12", "type": "string" },
+    { "key": "scheduleId", "value": "", "type": "string" },
+    { "key": "flightInstanceId", "value": "", "type": "string" },
+    { "key": "bookingReference", "value": "", "type": "string" },
+    { "key": "newAirportCode", "value": "AUH", "type": "string" },
+    { "key": "newAircraftId", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login as Admin",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "noauth" },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{adminUsername}}\",\n  \"password\": \"{{adminPassword}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Exchanges the seeded admin credentials for a JWT carrying ROLE_ADMIN. Public endpoint - no auth needed to reach it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "if (pm.response.code === 200) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set('adminToken', body.token);",
+                  "    pm.test('role is ADMIN', function () { pm.expect(body.role).to.eql('ADMIN'); });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Login as Client",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "noauth" },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{clientUsername}}\",\n  \"password\": \"{{clientPassword}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Exchanges the seeded client credentials for a JWT carrying ROLE_CLIENT. Public endpoint - no auth needed to reach it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "if (pm.response.code === 200) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set('clientToken', body.token);",
+                  "    pm.test('role is CLIENT', function () { pm.expect(body.role).to.eql('CLIENT'); });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin - Schedules",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          { "key": "token", "value": "{{adminToken}}", "type": "string" }
+        ]
+      },
+      "item": [
+        {
+          "name": "Create Schedule",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"flightNumber\": \"{{flightNumber}}\",\n  \"sourceAirportCode\": \"{{sourceAirportCode}}\",\n  \"destinationAirportCode\": \"{{destinationAirportCode}}\",\n  \"departureTime\": \"09:30:00\",\n  \"arrivalTime\": \"13:45:00\",\n  \"aircraftId\": {{aircraftId}},\n  \"daysOfOperation\": [\"MONDAY\", \"WEDNESDAY\", \"FRIDAY\"]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/schedules",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "schedules"]
+            },
+            "description": "Creates a flight schedule. Requires an ADMIN JWT (Bearer token, set at the folder level - run 'Login as Admin' first). Immediately materializes one flight_instance row per matching day-of-week over the next 365 days."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });",
+                  "if (pm.response.code === 201) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set('scheduleId', body.id);",
+                  "    pm.test('generatedInstanceCount > 0', function () {",
+                  "        pm.expect(body.generatedInstanceCount).to.be.above(0);",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Get Schedule by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/schedules/{{scheduleId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "schedules", "{{scheduleId}}"]
+            },
+            "description": "Fetches a previously created schedule by id. Requires an ADMIN JWT."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin - Airports",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          { "key": "token", "value": "{{adminToken}}", "type": "string" }
+        ]
+      },
+      "item": [
+        {
+          "name": "Create Airport",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"{{newAirportCode}}\",\n  \"name\": \"Zayed International Airport\",\n  \"city\": \"Abu Dhabi\",\n  \"country\": \"United Arab Emirates\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/airports",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "airports"]
+            },
+            "description": "Onboards a new airport. Requires an ADMIN JWT. Airports are create-and-read only, same immutable-after-creation pattern as flight schedules - no update/delete endpoint."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Get Airport by Code",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/airports/{{newAirportCode}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "airports", "{{newAirportCode}}"]
+            },
+            "description": "Fetches an onboarded airport by its 3-letter code. Requires an ADMIN JWT."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin - Aircraft",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          { "key": "token", "value": "{{adminToken}}", "type": "string" }
+        ]
+      },
+      "item": [
+        {
+          "name": "Create Aircraft",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"A321\",\n  \"seatRows\": 34,\n  \"seatLetters\": \"ABCDEF\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/aircraft",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "aircraft"]
+            },
+            "description": "Onboards a new aircraft type. Requires an ADMIN JWT. `seatLetters` must be uppercase A-Z only (e.g. \"ABCDEF\" = 6 seats per row). Create-and-read only - changing the seat grid after schedules/bookings reference this type would invalidate already-assigned seat labels."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });",
+                  "if (pm.response.code === 201) {",
+                  "    pm.collectionVariables.set('newAircraftId', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Get Aircraft by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/aircraft/{{newAircraftId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "aircraft", "{{newAircraftId}}"]
+            },
+            "description": "Fetches an onboarded aircraft type by id. Requires an ADMIN JWT."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Flights",
+      "item": [
+        {
+          "name": "Search Flights",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/flights/search?source={{sourceAirportCode}}&destination={{destinationAirportCode}}&date={{searchDate}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "flights", "search"],
+              "query": [
+                { "key": "source", "value": "{{sourceAirportCode}}" },
+                { "key": "destination", "value": "{{destinationAirportCode}}" },
+                { "key": "date", "value": "{{searchDate}}" }
+              ]
+            },
+            "description": "Searches bookable flight instances for a route on a given date. Public - no auth required. `searchDate` must fall within the schedule's 365-day generation window and match one of its days-of-operation (default is Monday, Wednesday or Friday) - update the `searchDate` collection variable to a near-future date matching one of those days if this returns an empty array."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const results = pm.response.json();",
+                  "pm.test('at least one flight returned', function () {",
+                  "    pm.expect(results.length).to.be.above(0);",
+                  "});",
+                  "if (results.length > 0) {",
+                  "    const match = results.find(r => r.flightNumber === pm.collectionVariables.get('flightNumber')) || results[0];",
+                  "    pm.collectionVariables.set('flightInstanceId', match.flightInstanceId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Get Seat Map",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/flights/{{flightInstanceId}}/seat-map",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "flights", "{{flightInstanceId}}", "seat-map"]
+            },
+            "description": "Returns AVAILABLE/BOOKED status for every seat on the aircraft for this flight instance. Public - no auth required."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Bookings",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          { "key": "token", "value": "{{clientToken}}", "type": "string" }
+        ]
+      },
+      "item": [
+        {
+          "name": "Create Booking",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"flightInstanceId\": {{flightInstanceId}},\n  \"passengers\": [\n    { \"name\": \"Alice\", \"seatLabel\": \"1A\" },\n    { \"name\": \"Bob\", \"seatLabel\": \"1B\" }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "bookings"]
+            },
+            "description": "Books one or more seats on a flight instance in a single transaction (all seats succeed together or the whole booking fails - 409 if any requested seat is already held). Requires an ADMIN or CLIENT JWT."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });",
+                  "if (pm.response.code === 201) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set('bookingReference', body.reference);",
+                  "    pm.test('status is CONFIRMED', function () {",
+                  "        pm.expect(body.status).to.eql('CONFIRMED');",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Get Booking by Reference",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/bookings/{{bookingReference}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "bookings", "{{bookingReference}}"]
+            },
+            "description": "Fetches a booking by its UUID reference (PNR). Still returns original seat assignments after cancellation, for audit purposes. Requires an ADMIN or CLIENT JWT."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Cancel Booking",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/bookings/{{bookingReference}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "bookings", "{{bookingReference}}", "cancel"]
+            },
+            "description": "Cancels a booking and releases its seats so they can be booked again. Idempotent - cancelling an already-cancelled booking returns the current state unchanged, not an error. Requires an ADMIN or CLIENT JWT."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('status is CANCELLED', function () {",
+                  "    pm.expect(pm.response.json().status).to.eql('CANCELLED');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Auth Error Cases",
+      "item": [
+        {
+          "name": "Login With Bad Password (401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "noauth" },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{adminUsername}}\",\n  \"password\": \"wrong-password\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Correct username, wrong password."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', function () { pm.response.to.have.status(401); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Admin Endpoint With No Auth (401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "noauth" },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"ZZZ\",\n  \"name\": \"Test\",\n  \"city\": \"Test\",\n  \"country\": \"Test\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/airports",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "airports"]
+            },
+            "description": "No token at all on a protected admin endpoint."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', function () { pm.response.to.have.status(401); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Admin Endpoint With CLIENT Role (403)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                { "key": "token", "value": "{{clientToken}}", "type": "string" }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"ZZZ\",\n  \"name\": \"Test\",\n  \"city\": \"Test\",\n  \"country\": \"Test\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/airports",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "airports"]
+            },
+            "description": "Valid JWT, wrong role - a CLIENT token cannot reach admin-only endpoints."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403', function () { pm.response.to.have.status(403); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Booking Endpoint With No Auth (401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "noauth" },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"flightInstanceId\": {{flightInstanceId}},\n  \"passengers\": [\n    { \"name\": \"Alice\", \"seatLabel\": \"1A\" }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "bookings"]
+            },
+            "description": "No token at all on a protected booking endpoint."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', function () { pm.response.to.have.status(401); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Error Cases",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          { "key": "token", "value": "{{clientToken}}", "type": "string" }
+        ]
+      },
+      "item": [
+        {
+          "name": "Create Booking - Duplicate Seat In Request (400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"flightInstanceId\": {{flightInstanceId}},\n  \"passengers\": [\n    { \"name\": \"Alice\", \"seatLabel\": \"2A\" },\n    { \"name\": \"Bob\", \"seatLabel\": \"2A\" }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "bookings"]
+            },
+            "description": "Same seat label requested twice within one booking - rejected as a malformed request."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', function () { pm.response.to.have.status(400); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Create Booking - Unknown Seat Label (400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"flightInstanceId\": {{flightInstanceId}},\n  \"passengers\": [\n    { \"name\": \"Alice\", \"seatLabel\": \"99Z\" }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "bookings"]
+            },
+            "description": "Seat label doesn't exist on the aircraft's configuration."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', function () { pm.response.to.have.status(400); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Create Booking - Seat Already Held (409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"flightInstanceId\": {{flightInstanceId}},\n  \"passengers\": [\n    { \"name\": \"Carol\", \"seatLabel\": \"1A\" }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "bookings"]
+            },
+            "description": "Run this after 'Create Booking' (Bookings folder) has already booked seat 1A on the same flightInstanceId, to see the 409 conflict response."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', function () { pm.response.to.have.status(409); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Get Booking - Unknown Reference (404)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/bookings/00000000-0000-0000-0000-000000000000",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "bookings", "00000000-0000-0000-0000-000000000000"]
+            },
+            "description": "A well-formed but non-existent booking reference."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', function () { pm.response.to.have.status(404); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    }
+  ]
+}

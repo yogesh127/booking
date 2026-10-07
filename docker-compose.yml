@@ -1,0 +1,33 @@
+services:
+  mysql:
+    image: 'mysql:8'
+    environment:
+      - 'MYSQL_DATABASE=airline'
+      - 'MYSQL_USER=airline'
+      - 'MYSQL_PASSWORD=airline'
+      - 'MYSQL_ROOT_PASSWORD=airline'
+    ports:
+      - '3306:3306'
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-uairline', '-pairline']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Only started when explicitly requested (`docker compose --profile standalone up`), never by
+  # `./mvnw spring-boot:run` — Spring Boot's docker-compose support brings up every service in this
+  # file that has no `profiles:` key, so without this guard it would try to build and launch a
+  # containerized copy of itself every time it runs locally.
+  app:
+    build: .
+    profiles: ['standalone']
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      - 'SPRING_DOCKER_COMPOSE_ENABLED=false'
+      - 'SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/airline'
+      - 'SPRING_DATASOURCE_USERNAME=airline'
+      - 'SPRING_DATASOURCE_PASSWORD=airline'
+    ports:
+      - '8080:8080'
